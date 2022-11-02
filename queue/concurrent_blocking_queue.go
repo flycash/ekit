@@ -22,7 +22,7 @@ import (
 // ConcurrentBlockingQueue 有界并发阻塞队列
 type ConcurrentBlockingQueue[T any] struct {
 	data  []T
-	mutex sync.RWMutex
+	mutex *sync.RWMutex
 
 	// 队头元素下标
 	head int
@@ -31,12 +31,10 @@ type ConcurrentBlockingQueue[T any] struct {
 	// 包含多少个元素
 	count int
 
-	enqueueSignal chan struct{}
-	dequeueSignal chan struct{}
-
 	notEmpty *sync.Cond
 	notFull  *sync.Cond
 
+	// zero 不能作为返回值返回，防止用户篡改
 	zero T
 }
 
@@ -44,115 +42,92 @@ type ConcurrentBlockingQueue[T any] struct {
 // 容量会在最开始的时候就初始化好
 // capacity 必须为正数
 func NewConcurrentBlockingQueue[T any](capacity int) *ConcurrentBlockingQueue[T] {
-	return &ConcurrentBlockingQueue[T]{
-		data:          make([]T, capacity),
-		enqueueSignal: make(chan struct{}),
-		dequeueSignal: make(chan struct{}),
+	mutex := &sync.RWMutex{}
+	res := &ConcurrentBlockingQueue[T]{
+		data:     make([]T, capacity),
+		mutex:    mutex,
+		notEmpty: sync.NewCond(mutex),
+		notFull:  sync.NewCond(mutex),
 	}
+	return res
 }
 
+// Enqueue 入队
+// 注意：目前我们还没实现超时控制，即我们只能部分利用 ctx 里面的超时或者取消机制
+// 核心在于当 goroutine 被阻塞之后，再无法监听超时或者取消
+// 只有在被唤醒之后我们才会再次检测是否已经超时或者取消
 func (c *ConcurrentBlockingQueue[T]) Enqueue(ctx context.Context, t T) error {
-	for {
-		c.mutex.Lock()
-		full := c.count == len(c.data)
-
-		if full {
-			// 要开始睡眠了
-			c.mutex.Unlock()
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-c.dequeueSignal:
-
-			}
-		} else {
-			c.data[c.tail] = t
-			c.tail++
-			// c.tail 已经是最后一个了，重置下标
-			if c.tail == cap(c.data) {
-				c.tail = 0
-			}
-			go func() {
-				c.enqueueSignal <- struct{}{}
-			}()
-			c.mutex.Unlock()
-			return nil
-		}
-	}
-}
-
-func (c *ConcurrentBlockingQueue[T]) EnqueueV2(ctx context.Context, t T) chan error {
-	signal := make(chan error, 1)
-	defer close(signal)
-	err := c.enqueue(t)
-	signal <- err
-	return signal
-}
-
-func (c *ConcurrentBlockingQueue[T]) EnqueueV1(ctx context.Context, t T) error {
-	signal := make(chan error)
-	go func() {
-		err := c.enqueue(t)
-		select {
-		case signal <- err:
-		default:
-		}
-	}()
-	select {
-	case <-ctx.Done():
+	if ctx.Err() != nil {
 		return ctx.Err()
-	case err := <-signal:
-		return err
 	}
+	c.mutex.Lock()
+	for c.count == len(c.data) {
+		c.notFull.Wait()
+		if ctx.Err() != nil {
+			c.mutex.Unlock()
+			return ctx.Err()
+		}
+	}
+	c.data[c.tail] = t
+	c.tail++
+	c.count++
+	// c.tail 已经是最后一个了，重置下标
+	if c.tail == cap(c.data) {
+		c.tail = 0
+	}
+	c.notEmpty.Signal()
+	c.mutex.Unlock()
+	return nil
 }
 
-func (c *ConcurrentBlockingQueue[T]) enqueue(t T) error {
-	for {
-		c.mutex.Lock()
-		for c.count == len(c.data) {
-			c.notFull.Wait()
-		}
-
-		c.data[c.tail] = t
-		c.tail++
-		// c.tail 已经是最后一个了，重置下标
-		if c.tail == cap(c.data) {
-			c.tail = 0
-		}
-		c.notEmpty.Signal()
-		c.mutex.Unlock()
-		return nil
-	}
-}
-
+// Dequeue 出队
+// 注意：目前我们还没实现超时控制，即我们只能部分利用 ctx 里面的超时或者取消机制
+// 核心在于当 goroutine 被阻塞之后，再无法监听超时或者取消
+// 只有在被唤醒之后我们才会再次检测是否已经超时或者取消
 func (c *ConcurrentBlockingQueue[T]) Dequeue(ctx context.Context) (T, error) {
-	for {
-		c.mutex.Lock()
-		if c.count == 0 {
+	if ctx.Err() != nil {
+		var t T
+		return t, ctx.Err()
+	}
+	c.mutex.Lock()
+	for c.count == 0 {
+		c.notEmpty.Wait()
+		if ctx.Err() != nil {
 			c.mutex.Unlock()
-			select {
-			case <-ctx.Done():
-				var t T
-				return t, ctx.Err()
-			case <-c.enqueueSignal:
-
-			}
-		} else {
-			val := c.data[c.head]
-			// 为了释放内存，GC
-			c.data[c.head] = c.zero
-			c.count--
-			c.head++
-			// 重置下标
-			if c.head == cap(c.data) {
-				c.head = 0
-			}
-
-			go func() {
-				c.dequeueSignal <- struct{}{}
-			}()
-			c.mutex.Unlock()
-			return val, nil
+			var t T
+			return t, ctx.Err()
 		}
 	}
+	val := c.data[c.head]
+	// 为了释放内存，GC
+	c.data[c.head] = c.zero
+	c.count--
+	c.head++
+	// 重置下标
+	if c.head == cap(c.data) {
+		c.head = 0
+	}
+	c.notFull.Signal()
+	c.mutex.Unlock()
+	return val, nil
+}
+
+func (c *ConcurrentBlockingQueue[T]) Len() int {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	return c.count
+}
+
+func (c *ConcurrentBlockingQueue[T]) AsSlice() []T {
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
+	res := make([]T, 0, c.count)
+	cnt := 0
+	capacity := cap(c.data)
+	for cnt < c.count {
+		index := (c.head + cnt) % capacity
+		res = append(res, c.data[index])
+		cnt++
+	}
+	return res
 }
