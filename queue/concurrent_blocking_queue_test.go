@@ -188,11 +188,6 @@ func TestConcurrentBlockingQueue_Enqueue(t *testing.T) {
 		require.NoError(t, err)
 		err = q.Enqueue(ctx, 345)
 		require.NoError(t, err)
-		go func() {
-			time.Sleep(time.Second * 2)
-			_, er := q.Dequeue(context.Background())
-			require.NoError(t, er)
-		}()
 		err = q.Enqueue(ctx, 456)
 		require.Equal(t, context.DeadlineExceeded, err)
 	})
@@ -343,11 +338,6 @@ func TestConcurrentBlockingQueue_Dequeue(t *testing.T) {
 		q := NewConcurrentBlockingQueue[int](3)
 		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 		defer cancel()
-		go func() {
-			time.Sleep(time.Second * 2)
-			er := q.Enqueue(context.Background(), 123)
-			require.NoError(t, er)
-		}()
 		val, err := q.Dequeue(ctx)
 		require.Equal(t, context.DeadlineExceeded, err)
 		require.Equal(t, 0, val)

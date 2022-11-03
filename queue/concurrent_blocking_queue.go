@@ -31,8 +31,8 @@ type ConcurrentBlockingQueue[T any] struct {
 	// 包含多少个元素
 	count int
 
-	notEmpty *sync.Cond
-	notFull  *sync.Cond
+	notEmpty *cond
+	notFull  *cond
 
 	// zero 不能作为返回值返回，防止用户篡改
 	zero T
@@ -46,8 +46,8 @@ func NewConcurrentBlockingQueue[T any](capacity int) *ConcurrentBlockingQueue[T]
 	res := &ConcurrentBlockingQueue[T]{
 		data:     make([]T, capacity),
 		mutex:    mutex,
-		notEmpty: sync.NewCond(mutex),
-		notFull:  sync.NewCond(mutex),
+		notEmpty: newCond(mutex),
+		notFull:  newCond(mutex),
 	}
 	return res
 }
@@ -62,10 +62,13 @@ func (c *ConcurrentBlockingQueue[T]) Enqueue(ctx context.Context, t T) error {
 	}
 	c.mutex.Lock()
 	for c.count == len(c.data) {
-		c.notFull.Wait()
-		if ctx.Err() != nil {
-			c.mutex.Unlock()
+		signal := c.notFull.signalCh()
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
+		case <-signal:
+			// 收到信号要重新加锁
+			c.mutex.Lock()
 		}
 	}
 	c.data[c.tail] = t
@@ -75,8 +78,8 @@ func (c *ConcurrentBlockingQueue[T]) Enqueue(ctx context.Context, t T) error {
 	if c.tail == cap(c.data) {
 		c.tail = 0
 	}
-	c.notEmpty.Signal()
-	c.mutex.Unlock()
+	// 这里会释放锁
+	c.notEmpty.broadcast()
 	return nil
 }
 
@@ -91,11 +94,13 @@ func (c *ConcurrentBlockingQueue[T]) Dequeue(ctx context.Context) (T, error) {
 	}
 	c.mutex.Lock()
 	for c.count == 0 {
-		c.notEmpty.Wait()
-		if ctx.Err() != nil {
-			c.mutex.Unlock()
+		signal := c.notEmpty.signalCh()
+		select {
+		case <-ctx.Done():
 			var t T
 			return t, ctx.Err()
+		case <-signal:
+			c.mutex.Lock()
 		}
 	}
 	val := c.data[c.head]
@@ -107,8 +112,7 @@ func (c *ConcurrentBlockingQueue[T]) Dequeue(ctx context.Context) (T, error) {
 	if c.head == cap(c.data) {
 		c.head = 0
 	}
-	c.notFull.Signal()
-	c.mutex.Unlock()
+	c.notFull.broadcast()
 	return val, nil
 }
 
