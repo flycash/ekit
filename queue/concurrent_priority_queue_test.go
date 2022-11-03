@@ -236,34 +236,32 @@ func TestConcurrentPriorityQueue_Dequeue(t *testing.T) {
 // TODO 有待设计更好的并发出入队测试方案
 func TestConcurrentPriorityQueue_EnqueueDequeue(t *testing.T) {
 	testCases := []struct {
-		name      string
-		enqueue   int
-		dequeue   int
-		wantSlice []int
-		remain    int
-		wantErr   error
-		errCount  int
+		name    string
+		enqueue int
+		dequeue int
+		remain  int
 	}{
 		{
 			name:    "出队等于入队",
-			enqueue: 500,
-			dequeue: 500,
+			enqueue: 50,
+			dequeue: 50,
 			remain:  0,
 		},
 		{
 			name:    "出队小于入队",
-			enqueue: 500,
-			dequeue: 400,
-			remain:  100,
+			enqueue: 50,
+			dequeue: 40,
+			remain:  10,
 		},
 		{
 			name:    "出队大于入队",
-			enqueue: 500,
-			dequeue: 600,
-			remain:  -100,
+			enqueue: 50,
+			dequeue: 60,
+			remain:  -10,
 		},
 	}
-	for _, tc := range testCases {
+	for _, tt := range testCases {
+		tc := tt
 		t.Run(tc.name, func(t *testing.T) {
 			q := NewConcurrentPriorityQueue[int](0, compare())
 			errChan := make(chan error, tc.dequeue)
